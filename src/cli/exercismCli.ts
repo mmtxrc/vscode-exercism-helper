@@ -28,6 +28,7 @@ interface CacheEntry<T> {
 }
 
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const API_BASE_URL = 'https://api.exercism.org';
 
 export class ExercismCli {
   private _cache = new Map<string, CacheEntry<any>>();
@@ -130,7 +131,16 @@ export class ExercismCli {
     if (cached) { return cached; }
     const https = await import('https');
     return new Promise((resolve, reject) => {
-      https.get('https://exercism.org/api/v2/tracks', (res) => {
+      const options = {
+        headers: {
+          'User-Agent': 'vscode-exercism-helper',
+        },
+      };
+      https.get(`${API_BASE_URL}/v2/tracks`, options, (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`API returned HTTP ${res.statusCode}`));
+          return;
+        }
         let data = '';
         res.on('data', (chunk: string) => { data += chunk; });
         res.on('end', () => {
@@ -143,7 +153,7 @@ export class ExercismCli {
             }));
             this.setCache('tracks', tracks);
             resolve(tracks);
-          } catch { resolve([]); }
+          } catch (err) { reject(err); }
         });
         res.on('error', reject);
       }).on('error', reject);
@@ -156,9 +166,15 @@ export class ExercismCli {
     if (cached) { return cached; }
     const https = await import('https');
     return new Promise((resolve, reject) => {
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = {
+        'User-Agent': 'vscode-exercism-helper',
+      };
       if (token) { headers['Authorization'] = `Bearer ${token}`; }
-      https.get(`https://exercism.org/api/v2/tracks/${track}/exercises`, { headers }, (res) => {
+      https.get(`${API_BASE_URL}/v2/tracks/${encodeURIComponent(track)}/exercises`, { headers }, (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`API returned HTTP ${res.statusCode}`));
+          return;
+        }
         let data = '';
         res.on('data', (chunk: string) => { data += chunk; });
         res.on('end', () => {
@@ -175,7 +191,7 @@ export class ExercismCli {
             }));
             this.setCache(cacheKey, exercises);
             resolve(exercises);
-          } catch { resolve([]); }
+          } catch (err) { reject(err); }
         });
         res.on('error', reject);
       }).on('error', reject);
@@ -186,18 +202,23 @@ export class ExercismCli {
     const cacheKey = `solutions:${track}`;
     const cached = this.getCached<Map<string, string>>(cacheKey);
     if (cached) { return cached; }
-    // GET https://exercism.org/api/v2/solutions?track_slug={track}&per_page=200
+    // GET https://api.exercism.org/v2/solutions?track_slug={track}&per_page=200
     // Header: Authorization: Bearer {token}
     // Returns a Map of exercise slug -> status (published/completed/started/iterated)
     const https = await import('https');
     return new Promise((resolve) => {
-      const url = `https://exercism.org/api/v2/solutions?track_slug=${encodeURIComponent(track)}&per_page=200`;
+      const url = `${API_BASE_URL}/v2/solutions?track_slug=${encodeURIComponent(track)}&per_page=200`;
       const options = {
         headers: {
           'Authorization': `Bearer ${token}`,
+          'User-Agent': 'vscode-exercism-helper',
         },
       };
       https.get(url, options, (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          resolve(new Map());
+          return;
+        }
         let data = '';
         res.on('data', (chunk: string) => { data += chunk; });
         res.on('end', () => {

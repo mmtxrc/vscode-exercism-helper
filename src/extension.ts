@@ -185,6 +185,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			let trackItems: vscode.QuickPickItem[];
 			try {
 				const tracks = await cli.fetchTracks();
+				if (tracks.length === 0) {
+					throw new Error('No tracks returned from API');
+				}
 				trackItems = tracks.map(t => ({
 					label: t.title,
 					description: `${t.numExercises} exercises`,
@@ -200,6 +203,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				}));
 			}
 			log(`Fetched ${trackItems.length} tracks for download picker`);
+
+			if (trackItems.length === 0) {
+				vscode.window.showWarningMessage('No language tracks found. Please check your internet connection.');
+				return;
+			}
 
 			const trackPick = await vscode.window.showQuickPick(trackItems, {
 				placeHolder: 'Select a language track',
@@ -219,6 +227,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				} catch { /* no token */ }
 
 				const exercises = await cli.fetchExercises(track, token || undefined);
+				if (exercises.length === 0) {
+					throw new Error('No exercises returned from API');
+				}
 				// Get local + solution data for status icons
 				const scannedTracks = await scanner.scan();
 				const localTrack = scannedTracks.find(t => t.slug === track);
@@ -274,6 +285,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				exerciseItems = [{ label: input, detail: input }];
 			}
 			log(`Fetched ${exerciseItems.length} exercises for track ${track}`);
+
+			if (exerciseItems.length === 0) {
+				vscode.window.showWarningMessage(`No exercises found for track ${trackPick.label}.`);
+				return;
+			}
 
 			const exercisePick = await vscode.window.showQuickPick(exerciseItems, {
 				placeHolder: `Select an exercise from ${trackPick.label}`,
