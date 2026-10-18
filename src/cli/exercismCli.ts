@@ -126,16 +126,21 @@ export class ExercismCli {
     return value;
   }
 
-  async fetchTracks(): Promise<Array<{ slug: string; title: string; numExercises: number }>> {
-    const cached = this.getCached<Array<{ slug: string; title: string; numExercises: number }>>('tracks');
-    if (cached) { return cached; }
+  async fetchTracks(token?: string, bypassCache = false): Promise<Array<{ slug: string; title: string; numExercises: number; isJoined?: boolean }>> {
+    const cacheKey = `tracks:${token ? 'auth' : 'anon'}`;
+    if (!bypassCache) {
+      const cached = this.getCached<Array<{ slug: string; title: string; numExercises: number; isJoined?: boolean }>>(cacheKey);
+      if (cached) { return cached; }
+    }
     const https = await import('https');
     return new Promise((resolve, reject) => {
-      const options = {
-        headers: {
-          'User-Agent': 'vscode-exercism-helper',
-        },
+      const headers: Record<string, string> = {
+        'User-Agent': 'vscode-exercism-helper',
       };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const options = { headers };
       https.get(`${API_BASE_URL}/v2/tracks`, options, (res) => {
         if (res.statusCode && res.statusCode >= 400) {
           reject(new Error(`API returned HTTP ${res.statusCode}`));
@@ -150,14 +155,25 @@ export class ExercismCli {
               slug: t.slug,
               title: t.title,
               numExercises: t.num_exercises || 0,
+              isJoined: Boolean(t.is_joined),
             }));
-            this.setCache('tracks', tracks);
+            this.setCache(cacheKey, tracks);
             resolve(tracks);
           } catch (err) { reject(err); }
         });
         res.on('error', reject);
       }).on('error', reject);
     });
+  }
+
+  async isTrackJoined(track: string, token: string): Promise<boolean> {
+    try {
+      const tracks = await this.fetchTracks(token, true);
+      const found = tracks.find(t => t.slug === track);
+      return Boolean(found?.isJoined);
+    } catch {
+      return false;
+    }
   }
 
   async fetchExercises(track: string, token?: string): Promise<Array<{ slug: string; title: string; difficulty: string; isUnlocked: boolean; isRecommended: boolean; type: string; blurb: string }>> {
@@ -314,4 +330,13 @@ export class ExercismCli {
       return { success: false, output };
     }
   }
+}
+
+export function isTrackNotJoinedError(err: unknown): boolean {
+  if (!err) { return false; }
+  const message = err instanceof Error ? err.message : String(err);
+  const stdout = typeof (err as any)?.stdout === 'string' ? (err as any).stdout : '';
+  const stderr = typeof (err as any)?.stderr === 'string' ? (err as any).stderr : '';
+  const combined = `${message} ${stdout} ${stderr}`;
+  return /not joined this track|track_not_joined/i.test(combined);
 }

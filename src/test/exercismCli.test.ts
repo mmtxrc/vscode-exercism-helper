@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ExercismCli } from '../cli/exercismCli';
+import { ExercismCli, isTrackNotJoinedError } from '../cli/exercismCli';
 import { EventEmitter } from 'events';
 
 // Mock https
@@ -53,14 +53,14 @@ describe('ExercismCli', () => {
       mockHttpsResponse(200, JSON.stringify({
         tracks: [
           { slug: 'go', title: 'Go', num_exercises: 165 },
-          { slug: 'rust', title: 'Rust', num_exercises: 120 },
+          { slug: 'rust', title: 'Rust', num_exercises: 120, is_joined: true },
         ],
       }));
 
       const tracks = await cli.fetchTracks();
       expect(tracks).toEqual([
-        { slug: 'go', title: 'Go', numExercises: 165 },
-        { slug: 'rust', title: 'Rust', numExercises: 120 },
+        { slug: 'go', title: 'Go', numExercises: 165, isJoined: false },
+        { slug: 'rust', title: 'Rust', numExercises: 120, isJoined: true },
       ]);
 
       expect(mockHttpsGet).toHaveBeenCalledWith(
@@ -72,9 +72,57 @@ describe('ExercismCli', () => {
       );
     });
 
+    it('includes authorization header when token is provided', async () => {
+      mockHttpsResponse(200, JSON.stringify({
+        tracks: [
+          { slug: 'javascript', title: 'JavaScript', num_exercises: 159, is_joined: true },
+        ],
+      }));
+
+      const tracks = await cli.fetchTracks('test-token');
+      expect(tracks).toEqual([
+        { slug: 'javascript', title: 'JavaScript', numExercises: 159, isJoined: true },
+      ]);
+
+      expect(mockHttpsGet).toHaveBeenCalledWith(
+        'https://api.exercism.org/v2/tracks',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'User-Agent': 'vscode-exercism-helper',
+            'Authorization': 'Bearer test-token',
+          }),
+        }),
+        expect.any(Function)
+      );
+    });
+
     it('rejects on HTTP error status', async () => {
       mockHttpsResponse(403, 'Forbidden');
       await expect(cli.fetchTracks()).rejects.toThrow('API returned HTTP 403');
+    });
+  });
+
+  describe('isTrackJoined()', () => {
+    it('returns true when track has is_joined true', async () => {
+      mockHttpsResponse(200, JSON.stringify({
+        tracks: [
+          { slug: 'javascript', title: 'JavaScript', num_exercises: 159, is_joined: true },
+        ],
+      }));
+
+      const joined = await cli.isTrackJoined('javascript', 'my-token');
+      expect(joined).toBe(true);
+    });
+
+    it('returns false when track is not joined', async () => {
+      mockHttpsResponse(200, JSON.stringify({
+        tracks: [
+          { slug: 'javascript', title: 'JavaScript', num_exercises: 159 },
+        ],
+      }));
+
+      const joined = await cli.isTrackJoined('javascript', 'my-token');
+      expect(joined).toBe(false);
     });
   });
 
@@ -110,6 +158,24 @@ describe('ExercismCli', () => {
 
       const result = await cli.download('go', 'hello-world');
       expect(result).toBe('/home/user/exercism/go/hello-world');
+    });
+  });
+
+  describe('isTrackNotJoinedError()', () => {
+    it('detects "You have not joined this track" error', () => {
+      const err = new Error('Command failed: exercism download --track=javascript --exercise=hello-world Error: You have not joined this track');
+      expect(isTrackNotJoinedError(err)).toBe(true);
+    });
+
+    it('detects error from stderr property', () => {
+      const err = Object.assign(new Error('Command failed'), { stderr: 'Error: You have not joined this track' });
+      expect(isTrackNotJoinedError(err)).toBe(true);
+    });
+
+    it('returns false for other errors', () => {
+      const err = new Error('Network timeout');
+      expect(isTrackNotJoinedError(err)).toBe(false);
+      expect(isTrackNotJoinedError(null)).toBe(false);
     });
   });
 });
