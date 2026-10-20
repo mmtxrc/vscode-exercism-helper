@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ExercismCli, isTrackNotJoinedError } from '../cli/exercismCli';
 import { EventEmitter } from 'events';
 
@@ -26,6 +26,7 @@ function mockHttpsResponse(statusCode: number, data: string) {
 
     const res = new EventEmitter() as any;
     res.statusCode = statusCode;
+    res.resume = vi.fn();
 
     // Call callback synchronously, then emit data and end on next tick
     process.nextTick(() => {
@@ -40,6 +41,17 @@ function mockHttpsResponse(statusCode: number, data: string) {
   });
 }
 
+function mockStalledRequest(): Promise<AbortSignal> {
+  return new Promise(resolve => {
+    mockHttpsGet.mockImplementation((_url: any, options: any) => {
+      const req = new EventEmitter() as any;
+      options.signal.addEventListener('abort', () => req.emit('error', new Error('aborted')), { once: true });
+      resolve(options.signal);
+      return req;
+    });
+  });
+}
+
 describe('ExercismCli', () => {
   let cli: ExercismCli;
 
@@ -47,6 +59,8 @@ describe('ExercismCli', () => {
     vi.clearAllMocks();
     cli = new ExercismCli();
   });
+
+  afterEach(() => { vi.useRealTimers(); });
 
   describe('fetchTracks()', () => {
     it('fetches tracks from api.exercism.org', async () => {
@@ -94,6 +108,58 @@ describe('ExercismCli', () => {
         }),
         expect.any(Function)
       );
+    });
+
+    it.each([undefined, 500])('aborts a stalled request at its deadline (%s)', async (timeoutMs) => {
+      vi.useFakeTimers();
+      const signalReady = mockStalledRequest();
+      const result = cli.fetchTracks('token', true, { timeoutMs });
+      const rejected = expect(result).rejects.toThrow('aborted');
+      const signal = await signalReady;
+      await vi.advanceTimersByTimeAsync(timeoutMs ?? 10000);
+      await rejected;
+      expect(signal.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('aborts an in-flight request on cancellation and disposes the listener', async () => {
+      const signalReady = mockStalledRequest();
+      let cancel!: () => void;
+      const dispose = vi.fn();
+      const cancellationToken = {
+        isCancellationRequested: false,
+        onCancellationRequested: vi.fn((listener: () => void) => {
+          cancel = listener;
+          return { dispose };
+        }),
+      };
+      const result = cli.fetchTracks('token', true, { cancellationToken });
+      const rejected = expect(result).rejects.toThrow('aborted');
+      const signal = await signalReady;
+      cancellationToken.isCancellationRequested = true;
+      cancel();
+      await rejected;
+      expect(signal.aborted).toBe(true);
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+
+    it('does not start a request when already cancelled', async () => {
+      const cancellationToken = { isCancellationRequested: true, onCancellationRequested: vi.fn() };
+      await expect(cli.fetchTracks('token', true, { cancellationToken })).rejects.toThrow('Operation cancelled');
+      expect(mockHttpsGet).not.toHaveBeenCalled();
+    });
+
+    it('cleans up its deadline and listener after a successful response', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      mockHttpsResponse(200, JSON.stringify({ tracks: [] }));
+      const dispose = vi.fn();
+      const cancellationToken = {
+        isCancellationRequested: false,
+        onCancellationRequested: vi.fn(() => ({ dispose })),
+      };
+      await cli.fetchTracks('token', true, { cancellationToken });
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     it('rejects on HTTP error status', async () => {

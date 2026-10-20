@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ExercismCli, isTrackNotJoinedError } from './cli/exercismCli';
+import { promptJoinAndDownload } from './commands/joinTrack';
 import { WorkspaceScanner } from './workspace/workspaceScanner';
 import { ExercismTreeProvider } from './views/exercismTreeProvider';
 import { ExerciseItem } from './views/exerciseItem';
@@ -203,131 +204,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		}
 	}
 
-	async function promptJoinAndDownload(
-		track: string,
-		exercise: string,
-		onSuccess: (downloadPath: string) => Promise<void> | void
-	): Promise<void> {
-		const choice = await vscode.window.showWarningMessage(
-			`You have not joined the ${track} track yet on Exercism. Would you like to join it now to download "${exercise}"?`,
-			'Join Track on Exercism',
-			'Cancel'
-		);
-		if (choice !== 'Join Track on Exercism') {
-			return;
-		}
-
-		// 1. Open the track page in the user's browser
-		const trackUrl = `https://exercism.org/tracks/${encodeURIComponent(track)}`;
-		await vscode.env.openExternal(vscode.Uri.parse(trackUrl));
-
-		// 2. Fetch CLI token if available to enable auto-detection
-		let token = '';
-		try {
-			const config = await cli.getConfig();
-			token = config.token;
-		} catch { /* no token */ }
-
-		// 3. Show progress and poll for the track to be joined
-		let downloadPath = '';
-		let downloadError = '';
-		let userCancelled = false;
-
-		await vscode.window.withProgress(
-			{
-				location: vscode.ProgressLocation.Notification,
-				title: `Waiting for ${track} track to be joined...`,
-				cancellable: true,
-			},
-			async (progress, cancellationToken) => {
-				progress.report({ message: 'Click "Join this track" in your browser...' });
-
-				const startTime = Date.now();
-				const timeoutMs = 60000; // 60 seconds polling
-
-				while (!cancellationToken.isCancellationRequested && Date.now() - startTime < timeoutMs) {
-					// Wait 2.5 seconds between polls
-					await new Promise((resolve) => setTimeout(resolve, 2500));
-					if (cancellationToken.isCancellationRequested) {
-						userCancelled = true;
-						return;
-					}
-
-					if (token) {
-						const isJoined = await cli.isTrackJoined(track, token);
-						if (isJoined) {
-							progress.report({ message: `Track joined! Downloading ${track}/${exercise}...` });
-							try {
-								downloadPath = await cli.download(track, exercise, cancellationToken);
-								cli.clearCache();
-								treeProvider.refresh();
-								return;
-							} catch (err: unknown) {
-								downloadError = err instanceof Error ? err.message : String(err);
-								return;
-							}
-						}
-					}
-				}
-
-				if (cancellationToken.isCancellationRequested) {
-					userCancelled = true;
-				}
-			}
-		);
-
-		if (userCancelled) {
-			return;
-		}
-
-		if (downloadPath) {
-			await onSuccess(downloadPath);
-			return;
-		}
-
-		// If auto-detection timed out or errored, offer a manual "Download Now" retry
-		const retryAction = await vscode.window.showInformationMessage(
-			`Once you've joined the ${track} track on Exercism, click "Download Now" to proceed.`,
-			'Download Now',
-			'Open Track Again',
-			'Cancel'
-		);
-
-		if (retryAction === 'Download Now') {
-			await vscode.window.withProgress(
-				{
-					location: vscode.ProgressLocation.Notification,
-					title: `Downloading ${track}/${exercise}...`,
-					cancellable: true,
-				},
-				async (_progress, cancellationToken) => {
-					try {
-						downloadPath = await cli.download(track, exercise, cancellationToken);
-						cli.clearCache();
-						treeProvider.refresh();
-					} catch (err: unknown) {
-						if (!cancellationToken.isCancellationRequested) {
-							downloadError = err instanceof Error ? err.message : String(err);
-						}
-					}
-				}
-			);
-
-			if (downloadPath) {
-				await onSuccess(downloadPath);
-			} else if (downloadError) {
-				if (isTrackNotJoinedError(downloadError)) {
-					vscode.window.showErrorMessage(
-						`The ${track} track still hasn't been joined. Please ensure you are logged into exercism.org and clicked "Join this track".`
-					);
-				} else {
-					vscode.window.showErrorMessage(`Download failed: ${downloadError}`);
-				}
-			}
-		} else if (retryAction === 'Open Track Again') {
-			await promptJoinAndDownload(track, exercise, onSuccess);
-		}
-	}
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('exercism.download', async () => {
@@ -499,7 +375,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (cancelled) { return; }
 			if (downloadError) {
 				if (isTrackNotJoinedError(downloadError)) {
-					await promptJoinAndDownload(track, exercise, async (newPath) => {
+					await promptJoinAndDownload(cli, () => treeProvider.refresh(), track, exercise, async (newPath) => {
 						await openDownloadedTrackExercise(newPath, track, exercise);
 					});
 					return;
@@ -639,6 +515,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (downloadError) {
 				if (isTrackNotJoinedError(downloadError)) {
 					await promptJoinAndDownload(
+						cli,
+						() => treeProvider.refresh(),
 						exerciseArg.track,
 						exerciseArg.slug,
 						async (newPath) => {

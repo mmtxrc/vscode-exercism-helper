@@ -29,6 +29,12 @@ interface CacheEntry<T> {
 
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const API_BASE_URL = 'https://api.exercism.org';
+const API_TIMEOUT_MS = 10000;
+
+interface TrackRequestOptions {
+  cancellationToken?: vscode.CancellationToken;
+  timeoutMs?: number;
+}
 
 export class ExercismCli {
   private _cache = new Map<string, CacheEntry<any>>();
@@ -126,23 +132,31 @@ export class ExercismCli {
     return value;
   }
 
-  async fetchTracks(token?: string, bypassCache = false): Promise<Array<{ slug: string; title: string; numExercises: number; isJoined?: boolean }>> {
+  async fetchTracks(token?: string, bypassCache = false, requestOptions: TrackRequestOptions = {}): Promise<Array<{ slug: string; title: string; numExercises: number; isJoined?: boolean }>> {
     const cacheKey = `tracks:${token ? 'auth' : 'anon'}`;
     if (!bypassCache) {
       const cached = this.getCached<Array<{ slug: string; title: string; numExercises: number; isJoined?: boolean }>>(cacheKey);
       if (cached) { return cached; }
     }
     const https = await import('https');
-    return new Promise((resolve, reject) => {
+    if (requestOptions.cancellationToken?.isCancellationRequested) {
+      throw new Error('Operation cancelled');
+    }
+    const controller = new AbortController();
+    const cancellation = requestOptions.cancellationToken?.onCancellationRequested(() => controller.abort());
+    // Bound the entire request, including DNS, connection setup and response body.
+    const timer = setTimeout(() => controller.abort(), Math.min(requestOptions.timeoutMs ?? API_TIMEOUT_MS, API_TIMEOUT_MS));
+    return new Promise<Array<{ slug: string; title: string; numExercises: number; isJoined?: boolean }>>((resolve, reject) => {
       const headers: Record<string, string> = {
         'User-Agent': 'vscode-exercism-helper',
       };
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      const options = { headers };
+      const options = { headers, signal: controller.signal };
       https.get(`${API_BASE_URL}/v2/tracks`, options, (res) => {
         if (res.statusCode && res.statusCode >= 400) {
+          res.resume();
           reject(new Error(`API returned HTTP ${res.statusCode}`));
           return;
         }
@@ -163,12 +177,15 @@ export class ExercismCli {
         });
         res.on('error', reject);
       }).on('error', reject);
+    }).finally(() => {
+      clearTimeout(timer);
+      cancellation?.dispose();
     });
   }
 
-  async isTrackJoined(track: string, token: string): Promise<boolean> {
+  async isTrackJoined(track: string, token: string, requestOptions: TrackRequestOptions = {}): Promise<boolean> {
     try {
-      const tracks = await this.fetchTracks(token, true);
+      const tracks = await this.fetchTracks(token, true, requestOptions);
       const found = tracks.find(t => t.slug === track);
       return Boolean(found?.isJoined);
     } catch {
